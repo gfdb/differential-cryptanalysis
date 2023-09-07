@@ -33,6 +33,7 @@ using std::uint32_t;
 
 // The following is the given code from the wes implementation
 // *****************************************************************************
+// *****************************************************************************
 int sbox[8][16] = {
 	/* 1 */
 	{ 6, 12, 3, 8, 14, 5, 11, 1, 2, 4, 13, 7, 0, 10, 15, 9}, 
@@ -157,23 +158,28 @@ uint64_t wes_encrypt(uint64_t pt, uint64_t master_key)
 	return ct;
 }
 // *****************************************************************************
+// ************************** end of given code ********************************
 // *****************************************************************************
 
 
-// key is thread id, value is vector of keys found in that thread
-
 // define a type for the map
+// key is thread id, value is vector of keys found in that thread
+// takes more memory but avoids concurrency issues
 using ThreadIntVectorMap = unordered_map<thread::id, vector<uint32_t>>;
 
 // lists of k4 candidates from each thread
 ThreadIntVectorMap key4_vector_map;
 // lists of k4 that were successfull in finding k3 candidates
-unordered_map<thread::id, set<uint32_t>> key4_vector_map_confirmed;
+unordered_map<thread::id, vector<uint32_t>> key4_vector_map_confirmed;
+
 // lists of k3 candidates from each thread
 ThreadIntVectorMap key3_vector_map;
+
 // lists of k2 candidates from each thread
 ThreadIntVectorMap key2_vector_map;
 
+// number of cores on current cpu
+uint32_t num_cores = std::thread::hardware_concurrency();
 
 vector<uint32_t> squash_threadid_intvector_map(const ThreadIntVectorMap& threadIntMap) {
     // Create a vector to hold the combined integers
@@ -247,7 +253,6 @@ void create_differential_tables_and_high_prob_pairs() {
 
 
 void check_key_2_against_ctext_ptext_pairs(uint32_t potential_k2, uint32_t k3_to_test_with, uint32_t k4_to_test_with) {
-    // cout << hex << potential_k2 << endl;
     for (int i = 0; i < 6; i++) {
         // uint32_t deltaz = pr1[i] xor pr2[1]; which is just deltax
         uint32_t newcl1 = cl1k2[i] ^ round_func(cr1k2[i], k4_to_test_with);
@@ -308,8 +313,6 @@ vector<uint32_t> crack_k4() {
     // start k4 cracking timer
     auto startk4 = std::chrono::high_resolution_clock::now();
 
-    // number of cores on current cpu
-    uint32_t num_cores = std::thread::hardware_concurrency();
 
     cout << "Using " << num_cores << " cpu cores " << endl;
     // create array of threads of size 10
@@ -321,20 +324,24 @@ vector<uint32_t> crack_k4() {
     uint32_t increment_val = 0xFFFFFFFF / num_cores;
     // the end value of thread n
     uint64_t endval = increment_val;
-    for (int i = 0; i < num_cores; i++) {
+    for (uint64_t i = 0; i < num_cores; i++) {
+
+        // for the last thread, make the end value uint32_t max value (0xFFFFFFFF)
+        if (i == num_cores-1)
+            endval = 0xFFFFFFFF;
+
         // add a thread to the array of threads
         // its job will be to test all keys(k4) from 
         // startval to endval
-        cout << "Start val: " << startval << " - End Val: " << endval << endl;
+        cout << "Thread " << i+1 << ": ";
+        cout << "0x" << std::dec << startval << " - 0x" << std::dec << endval << endl;
         threads[i] = thread(test_keys_X_to_y_k4, startval, endval);
         // the start value for the next thread becomes the 
         // end value of this thread
         startval = endval + 1;
         // increment the end value for the next thread
         endval += increment_val;
-        // for the last thread, make the end value uint32_t max value (0xFFFFFFFF)
-        if (i == num_cores-1)
-            endval = 0xFFFFFFFF;
+
     }
     // stop execution of main until the threads have finished 
     for (int i = 0; i < num_cores; i++) {
@@ -353,67 +360,240 @@ vector<uint32_t> crack_k4() {
     auto stopk4 = std::chrono::high_resolution_clock::now();
     // calculate how long it took to find k4
     auto durationk4 = std::chrono::duration_cast<std::chrono::seconds>(stopk4 - startk4);
-    cout << "Time taken to find k4 candidates: " << durationk4.count() << " seconds\n" << endl;
+    cout << "Time taken to find k4 candidates: " << std::dec << durationk4.count() << " seconds\n" << endl;
 
     return squash_threadid_intvector_map(key4_vector_map);
 
 }
 
-uint32_t get_even_bits(const uint32_t& num) {
-    // the first even bit starts at 1 because we consider an even bit in the
-    // context of the 64 bit master key
+// Function to replace even or odd bits of num_in with bits from replacer
+// if evenOrOdd is true, replace even bits, if false replace odd bits
+uint32_t replaceEvenOrOddBits(uint32_t num_in, uint16_t replacer, bool evenOrOdd) {
+    // cout << "inside evenodd bits" << endl;
 
-    
+    int remainder = 0;
+    if (!evenOrOdd) {
+        remainder = 1;
+    }
 
+    // Iterate through each bit position (0-based index)
+    for (int i = 0; i < 32; i++) {
+        // Check if the bit position is within the range of the replacer
+        if (i % 2 == remainder && i / 2 < 16) {
+            // Calculate the mask for the current bit position
+            uint32_t mask = 1 << i;
+
+            // Extract the bit from replacer and shift it to the current bit position
+            uint32_t bit = ((replacer >> (i / 2)) & 1) << i;
+
+            // Clear the bit in num_in and set it to the corresponding bit from replacer
+            num_in = (num_in & ~mask) | bit;
+        }
+    }
+
+    return num_in;
 }
 
+uint32_t extractEvenOddBits(uint32_t number, string evenOrOdd) {
+    // extracts the odd bits from an unsigned 32 bit integer
+    // from least significant to most significant
+    // pass "even" to extract even bits, any other string for odd
+    uint32_t result = 0;
+    int shift = 0;
+    int start = 0;
+    if (evenOrOdd == "even")
+        start = 1;
 
-int test_keys_X_to_y_k3(const vector<uint32_t>& k4s_to_test) {
+
+    // take number = 0b01010101010101010101010101010101
+    // bit = (number & (1 << i)) != 0
+    // bit = 0b01010... & 0b000...1 != 0
+    // bit = 0b000...0 != 0 
+    // bit = 0b000...1
+    // result |= (bit << shift++)
+    // result = 0b00... | 0b000...1 << 0++
+    // result = 0b00... | 0b000...1
+    // result = 0b00...01
+    // repeat....
+    for(int i = 0; i < 32; i += 2) {
+        uint32_t bit = (number & (1 << i)) != 0; // Extract the odd bit
+        result |= (bit << shift++); // Store the extracted bit in the result
+    }
+
+    return result;
+}
+
+int test_keys_k2(const vector<uint32_t>& k3s_to_test, const uint32_t& k4) {
+    
+    thread::id thread_id = std::this_thread::get_id();
+    // if thread id not already a key in map
+    if (key2_vector_map.find(thread_id) == key2_vector_map.end()) {
+        // create a vector for the keys this thread will find
+        key2_vector_map[std::this_thread::get_id()] = vector<uint32_t>();
+    }
+
+    for (int i = 0; i < k3s_to_test.size(); i++) {
+
+        // we take the first 16 bits of k3 (intersection between k2 and k3)
+        uint16_t fist_16_bits_of_k3 = static_cast<uint16_t>(k3s_to_test[i] >> 16);
+
+        // we replace the even bits of 0x00... (32 0s) with the first 16 bits of k3
+        uint32_t min_possible_k2 = replaceEvenOrOddBits(0x0, fist_16_bits_of_k3, true);
+
+        for (uint16_t j = 0x0000; j < 0xFFFF; j++) {
+
+            // we replace the odd bits of or minimum possible k2 with the bits from
+            // our 0x0000 - 0xFFFF loop (j)
+            uint32_t potential_k2 = replaceEvenOrOddBits(min_possible_k2, j, false);
+
+            // number of pairs the current k2 worked with
+            uint32_t num_success = 0;
+
+            for (int k = 0; k < 6; k++) {
+                // uint32_t deltaz = pr1[i] xor pr2[1]; which is just deltax
+                uint32_t newcl1 = cl1k2[k] ^ round_func(cr1k2[k], k4);
+                uint32_t newcr1 = cr1k2[k] ^ round_func(newcl1, k3s_to_test[i]);
+
+                uint32_t newcl2 = cl2k2[k] ^ round_func(cr2k2[k], k4);
+                uint32_t newcr2 = cr2k2[k] ^ round_func(newcl2, k3s_to_test[i]);
+
+                uint32_t actual_deltaz = f_of_deltax;
+
+                uint32_t z1 = newcl1 ^ round_func(newcr1, potential_k2);
+                uint32_t z2 = newcl2 ^ round_func(newcr2, potential_k2);
+                uint32_t test_deltaz = z1 ^ z2;
+
+                if (0 == (actual_deltaz ^ test_deltaz)) {
+                    // if this key works with this set of pairs
+                    num_success++;
+                } else {
+                    // if this key fails with even 1 pair, we know it's not a candidate key
+                    break;
+                }
+            }
+
+            if (num_success == 6) {
+                // store the k2 candidate
+                key2_vector_map[std::this_thread::get_id()].push_back(potential_k2);
+            }
+
+
+        }
+    }
+
+    
+    return 0;
+}
+
+vector<uint32_t> crack_k2(const vector<uint32_t>& k3_candidates, const uint32_t& k4) {
+    cout << "================ CRACKING K2 ==================" << endl;
+    // start timer for cracking k2
+    auto startk2 = std::chrono::high_resolution_clock::now();
+    // create a vector for the threads we will use to find k2
+    vector<thread> k2_threads;
+
+    uint32_t num_k3s_per_thread = k3_candidates.size() / num_cores;
+    if (num_k3s_per_thread < 1)
+        num_k3s_per_thread = 1;
+
+
+    uint32_t thread_batch = 0;
+    uint16_t cntr = 1;
+
+    cout << "Creating threads... \nEach thread will be responsible for testing ";
+    cout << num_k3s_per_thread << " k3 candidates.\n" << endl;
+
+    for (int i = 0; i < k3_candidates.size(); i+=num_k3s_per_thread) {
+        vector<uint32_t> k3s_to_test(
+            k3_candidates.begin() + thread_batch,
+            k3_candidates.begin() + thread_batch + num_k3s_per_thread
+        );
+        cout << "  Thread " << std::dec << cntr++ << "[ ";
+        for (auto elem: k3s_to_test) {
+            cout << hex << elem << " ";
+        }
+        cout << "]" << endl;
+        k2_threads.push_back(thread(test_keys_k2, k3s_to_test, k4));
+        thread_batch += num_k3s_per_thread;
+    }
+
+    // pause execution of main until k2 threads execution are complete
+    for (thread &t : k2_threads) {
+        t.join();
+    }
+    // stop timer for cracking k2
+    auto stopk2 = std::chrono::high_resolution_clock::now();
+    // calculate duration for cracking k2
+    auto durationk2 = std::chrono::duration_cast<std::chrono::milliseconds>(stopk2 - startk2);
+
+    // vector for combining the vectors of 
+    // k2 candidates found by each thread
+    vector<uint32_t> k2_candidates = squash_threadid_intvector_map(key2_vector_map);
+
+    cout << "Number of k2s found: " << std::dec << k2_candidates.size() << endl;
+    cout << "Time taken to find k2 candidates: " << std::dec << durationk2.count() << " milliseconds\n" << endl;
+
+    return k2_candidates;
+}
+
+void test_keys_k3(vector<uint32_t> k4s_to_test) {
 
     thread::id thread_id = std::this_thread::get_id();
     // if thread id not already a key in map
     if (key3_vector_map.find(thread_id) == key3_vector_map.end()) {
         // create a vector for the keys this thread will find
         key3_vector_map[std::this_thread::get_id()] = vector<uint32_t>();
-        key4_vector_map_confirmed[std::this_thread::get_id()] = set<uint32_t>();
+        key4_vector_map_confirmed[std::this_thread::get_id()] = vector<uint32_t>();
     }
 
-    for (u_int64_t potential_k3 = start; potential_k3 < end; potential_k3 += 0x00010000) {
-        // number of pairs the current k3 worked with
-        uint32_t num_success = 0;
+    for (int i = 0; i < k4s_to_test.size(); i++) {
+        
+        // start range: this wil be in the form 0x0000XXXX
+        // where the Xs are the bits from our k4
+        uint32_t min_possible_k3 = extractEvenOddBits(k4s_to_test[i], "odd");
+        
+        // end range: this will be in the form 0xFFFFXXXX
+        // where the Xs are the bits from our k4
+        uint32_t max_possible_k3 = min_possible_k3 + 0xFFFF0000;
 
-        for (int i = 0; i < 6; i++) {
+        for (uint64_t potential_k3 = min_possible_k3; potential_k3 <= max_possible_k3; potential_k3 += 0x00010000) {
 
-            // CR becomes the new CL
-            uint32_t new_CL1 = cr1k3[i];
-            uint32_t new_CL2 = cr2k3[i];
+            // cout << hex << potential_k3 << endl;
+            // number of pairs the current k3 worked with
+            uint32_t num_success = 0;
 
-            // partially decrpyt CL to get new CR
-            uint32_t new_CR1 = cl1k3[i] ^ round_func(cr1k3[i], k4_to_test);
-            uint32_t new_CR2 = cl2k3[i] ^ round_func(cr2k3[i], k4_to_test);
+            for (int j = 0; j < 6; j++) {
 
-            uint32_t actual_deltaz = round_func_no_xor(pr1k3[i]) ^ round_func_no_xor(pr2k3[i]);
+                // CR becomes the new CL
+                uint32_t new_CL1 = cr1k3[j];
+                uint32_t new_CL2 = cr2k3[j];
 
-            uint32_t z1 = new_CL1 ^ round_func(new_CR1, potential_k3);
-            uint32_t z2 = new_CL2 ^ round_func(new_CR2, potential_k3);
-            uint32_t test_deltaz = z1 ^ z2;
+                // partially decrpyt CL to get new CR
+                uint32_t new_CR1 = cl1k3[j] ^ round_func(cr1k3[j], k4s_to_test[i]);
+                uint32_t new_CR2 = cl2k3[j] ^ round_func(cr2k3[j], k4s_to_test[i]);
 
-            if (0 == (actual_deltaz ^ test_deltaz)) {
-                num_success++;
-            } else {
-                break;
+                uint32_t actual_deltaz = round_func_no_xor(pr1k3[j]) ^ round_func_no_xor(pr2k3[j]);
+
+                uint32_t z1 = new_CL1 ^ round_func(new_CR1, potential_k3);
+                uint32_t z2 = new_CL2 ^ round_func(new_CR2, potential_k3);
+                uint32_t test_deltaz = z1 ^ z2;
+
+                if (0 == (actual_deltaz ^ test_deltaz)) {
+                    num_success++;
+                } else {
+                    break;
+                }
+            }
+
+            if (num_success == 6) {
+                // add k3 candidate to vector for this thread
+                key3_vector_map[std::this_thread::get_id()].push_back(potential_k3);
+
+                // keep track of k4 candidates that worked, should only be 1
+                key4_vector_map_confirmed[std::this_thread::get_id()].push_back(k4s_to_test[i]);
             }
         }
-
-        if (num_success == 6) {
-            // add k3 candidate to vector for this thread
-            key3_vector_map[std::this_thread::get_id()].push_back(potential_k3);
-
-            // keep track of k4 candidates that worked
-            key4_vector_map_confirmed[std::this_thread::get_id()].insert(k4_to_test);
-        }
     }
-    return 0;
 }
 
 vector<uint32_t> crack_k3(const vector<uint32_t>& k4_candidates) {
@@ -423,48 +603,29 @@ vector<uint32_t> crack_k3(const vector<uint32_t>& k4_candidates) {
     // create a vector for the threads we will use to find k3
     vector<thread> k3_threads;
 
-    // number of cores on current cpu
-    uint32_t num_cores = std::thread::hardware_concurrency();
-
     uint32_t num_k4s_per_thread = k4_candidates.size() / num_cores;
 
+    if (num_k4s_per_thread == 0)
+        num_k4s_per_thread = 1;
+
+    uint32_t thread_batch = 0;
+    uint16_t cntr = 1;
+
+    cout << "Creating threads... \nEach thread will be responsible for testing ";
+    cout << num_k4s_per_thread << " k4 candidates.\n" << endl;
+
     for (int i = 0; i < k4_candidates.size(); i+=num_k4s_per_thread) {
-        vector<uint32_t> k4s_to_test(k4_candidates.begin(), k4_candidates.begin() + num_k4s_per_thread);
-        k3_threads.push_back(thread(test_keys_X_to_y_k3, k4s_to_test));
-    }
-
-    // for each of the key lists for k4
-    for (auto item : key4_vector_map) {    
-        // for each of the keys in the list
-        for (int i = 0; i < item.second.size(); i++) {
-            // start range for thread n
-            uint32_t start_range_k3 = 0;
-            // end range for thread n
-            uint32_t end_range_k3 = 0;
-            // k4 to test
-            uint32_t curr_key = item.second[i];
-
-            // convert k4 into binary and then into a string
-            string keybits = bitset<32>(curr_key).to_string();
-            // buffer to build k3 with
-            string bitbuffer = "";
-
-            // for each even bit in k4
-            for (int j = 1; j < 32; j+=2) {
-                // push the even bits to the bit buffer for potential k3s from this k4
-                bitbuffer.push_back(keybits[j]);
-            };
-            // set the start range for this thread to minimum possible k3 value from this k4
-            // Ex: 0x0000ABCD
-            start_range_k3 = stoi(bitbuffer, 0, 2);
-
-            // set the end range for this thread to maximum possible k3 value from this k4
-            // Ex: 0xFFFFABCD
-            end_range_k3 = stoi(bitbuffer, 0, 2) + 0xFFFF0000;
-            
-            // add thread to the vector of threads for finding k3
-            k3_threads.push_back(thread(test_keys_X_to_y_k3, start_range_k3, end_range_k3, curr_key));
-       }
+        vector<uint32_t> k4s_to_test(
+            k4_candidates.begin() + thread_batch,
+            k4_candidates.begin() + thread_batch + num_k4s_per_thread
+        );
+        cout << "  Thread " << std::dec << cntr++ << "[ ";
+        for (auto elem: k4s_to_test) {
+            cout << hex << elem << " ";
+        }
+        cout << "]" << endl;
+        k3_threads.push_back(thread(test_keys_k3, k4s_to_test));
+        thread_batch += num_k4s_per_thread;
     }
 
     // stop execution of main until threads for k3 are finished execution
@@ -478,67 +639,11 @@ vector<uint32_t> crack_k3(const vector<uint32_t>& k4_candidates) {
 
     vector<uint32_t> k3_candidates = squash_threadid_intvector_map(key3_vector_map);
 
-    cout << "Number of candidate keys for k3: " << k3_candidates.size() << endl;
-    cout << "Time taken to find k3 candidates: " << durationk3.count();
+    cout << "Number of candidate keys for k3: " << std::dec << k3_candidates.size() << endl;
+    cout << "Time taken to find k3 candidates: " << std::dec << durationk3.count();
     cout << " milliseconds\n" << endl;
 
     return k3_candidates;
-}
-
-int test_keys_X_to_y_k2(uint32_t k3_to_test, uint32_t k4_to_test) {
-    string k3_bits_as_string = bitset<32>(k3_to_test).to_string();
-    string k2_bitbuffer = "";
-    
-    thread::id thread_id = std::this_thread::get_id();
-    // if thread id not already a key in map
-    if (key2_vector_map.find(thread_id) == key2_vector_map.end()) {
-        // create a vector for the keys this thread will find
-        key2_vector_map[std::this_thread::get_id()] = vector<uint32_t>();
-    }
-
-    // cntr that will go from 0 to 16
-    // to put the fist 16 bits of k3
-    // in the even bit positions
-    int cntr = 0;
-    for (int i = 0; i < 32; i++) {
-        if (i % 2 != 0) {
-            // even bits
-            k2_bitbuffer.push_back(k3_bits_as_string[cntr]);
-            cntr++;
-        } else {
-            // we put 0 in the odd bit positions for now
-            k2_bitbuffer.push_back('0');
-        }
-    }
-
-    // 0000 -> FFFF
-    for(uint32_t i = 0x0000; i <= 0xFFFF; i++) {
-        // replace every odd bit in potential k2 with the bits from i
-        string bits_to_put_in = bitset<16>(i).to_string();
-        k2_bitbuffer[0] = bits_to_put_in[0];
-        k2_bitbuffer[2] = bits_to_put_in[1];
-        k2_bitbuffer[4] = bits_to_put_in[2];
-        k2_bitbuffer[6] = bits_to_put_in[3];
-        k2_bitbuffer[8] = bits_to_put_in[4];
-        k2_bitbuffer[10] = bits_to_put_in[5];
-        k2_bitbuffer[12] = bits_to_put_in[6];
-        k2_bitbuffer[14] = bits_to_put_in[7];
-        k2_bitbuffer[16] = bits_to_put_in[8];
-        k2_bitbuffer[18] = bits_to_put_in[9];
-        k2_bitbuffer[20] = bits_to_put_in[10];
-        k2_bitbuffer[22] = bits_to_put_in[11];
-        k2_bitbuffer[24] = bits_to_put_in[12];
-        k2_bitbuffer[26] = bits_to_put_in[13];
-        k2_bitbuffer[28] = bits_to_put_in[14];
-        k2_bitbuffer[30] = bits_to_put_in[15];
-
-        uint32_t potential_k2 = (uint32_t)std::stol(k2_bitbuffer, 0, 2);
-        // check k2/k3 with cipher text pairs
-        check_key_2_against_ctext_ptext_pairs(potential_k2, k3_to_test, k4_to_test);
-
-    };
-
-    return 0;
 }
 
 
@@ -550,63 +655,22 @@ int main() {
 
     vector<uint32_t> k4_candidates = crack_k4();
 
-    vector<uint32_t> vector_k3s = crack_k3(k4_candidates);
+    vector<uint32_t> k3_candidates = crack_k3(k4_candidates);
 
-    // counter for the number of k4 candidates
-    // that were successfully used to find 
-    // a k3 candidate
-    int k4counter = 0;
     // a variable for storing the single k4 we will get (spoilers!!)
-    uint32_t fourth_subkey;
-    // for each set of k4s successfully used to 
-    // find a k3 candidate
-    for (auto item: key4_vector_map_confirmed) {
-        // add the size of the set to the k4counter
-        k4counter += item.second.size();
-        // if the set's size is not 0
-        if (item.second.size() != 0) {
-            // for each item in the set (its only going to be 1 item but just in case we'll loop over it)
-            for (auto i: item.second) {
-                // set our confirmed k4 subkey
-                fourth_subkey = i;
-            }
-        }
+    uint32_t k4;
+
+    if (!key4_vector_map_confirmed.empty()) {
+        // there will only be one k4 candidate left after cracking k3
+        auto it = key4_vector_map_confirmed.begin();
+        k4 = it->second[0];
+    } else {
+        cout << "Unable to confirm any k4 candidates";
+        cout << " while cracking k3. \nExiting" << std::endl;
+        exit(0);
     }
 
-    cout << "Number of successful keys for k4: " << k4counter << endl;
-
-
-    cout << "================ CRACKING K2 ==================" << endl;
-    // start timer for cracking k2
-    auto startk2 = std::chrono::high_resolution_clock::now();
-    // create a vector for the threads we will use to find k2
-    vector<thread> k2_threads;
-
-    // for each k3 candidate
-    for (auto potential_k3 : vector_k3s) {    
-        // create a thead for that k4 candidate
-        k2_threads.push_back(thread(test_keys_X_to_y_k2, potential_k3, fourth_subkey));
-    }
-    // pause execution of main until k2 thread execution is complete
-    for (thread &t : k2_threads) {
-        t.join();
-    }
-    // stop timer for cracking k2
-    auto stopk2 = std::chrono::high_resolution_clock::now();
-    // calculate duration for cracking k2
-    auto durationk2 = std::chrono::duration_cast<std::chrono::milliseconds>(stopk2 - startk2);
-
-    // vector for combining the vectors of 
-    // k2 candidates found by each thread
-    vector<uint32_t> vector_k2s;
-    // for each vector of k2 candidates from each thread
-    for (auto item: key2_vector_map) {
-        // combine vector of k2 candidates together
-        vector_k2s.insert(vector_k2s.end(), item.second.begin(), item.second.end());
-    }
-    cout << "Number of k2s found: " << vector_k2s.size() << endl;
-    cout << "Time taken to find k2 candidates: " << durationk2.count() << " milliseconds\n" << endl;
-
+    vector<uint32_t> k2_candidates = crack_k2(k3_candidates, k4);
 
     cout << "================ CRACKING MASTER KEY ==================" << endl;
 
@@ -616,9 +680,9 @@ int main() {
     u_int64_t correct_ciphertext_k1 = 0x4661866A275114EC;
 
     // brute force k1 using k2s and k4
-    for (uint32_t k2_to_test: vector_k2s) {
+    for (uint32_t k2_to_test: k2_candidates) {
         // creater master key by using k2 as the first 8 bytes and k1 as the last 8 bytes
-        u_int64_t master_key_to_test = (u_int64_t) k2_to_test << 32 | fourth_subkey;
+        u_int64_t master_key_to_test = (u_int64_t) k2_to_test << 32 | k4;
 
         // check if encryption with trial master key results in correct encryption
         if (correct_ciphertext_k1 == wes_encrypt(pt_for_k1, master_key_to_test)) {
