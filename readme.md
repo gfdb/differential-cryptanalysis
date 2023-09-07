@@ -60,7 +60,7 @@ We analyze the s-boxes by creating difference distrubution tables. The entry in 
 
 Here is the table from the first s-box to demonstrate its shape:
 
-<img src = "images/s-box1_diff_dist_table.png" alt = "s-box 1 distribution table" height ="400">
+<img src = "images/sbox1_diff_dist_table.png" alt = "s-box 1 distribution table" height ="400">
 
 Let's analyze the s-boxes to see if there are any other input/output pairs that have 100% probability besides (0, 0).
 
@@ -68,12 +68,12 @@ Let's analyze the s-boxes to see if there are any other input/output pairs that 
 * s-box2 - (2, 5)
 * s-box3 - (6, D)
 
-Nice, we have 3 input/output pairs that are non zero. We can abuse these to track the propagation of our input through the cypher. 
+Nice, we have 3 input/output pairs that are non zero with a probability of 1. We can abuse these to track the propagation of our input through the cypher. 
 
 ## Breaking K4
 This is where things get a bit technical so bear with me.
 
-The tactic for breaking the fourth round of encryption is to use sets of plaintext pairs that have a specific result (differential) when XORed together. The cipher takes in two 8 byte hexadecimal numbers, L0 (the left 8) and R0 (the right 8), to form a 16 byte hexadecimal input. We will construct two plaintext inputs at the same time, they will be In1 = L0R0 and In2 = L1R1. We will choose L0 and L1 such that 
+The tactic for breaking the fourth round of encryption is to use sets of plaintext pairs that have a specific result (differential) when XORed together. The cipher takes in two 8 byte hexadecimal numbers, `L0` (the left 8) and `R0` (the right 8), to form a 16 byte hexadecimal input. We will construct two plaintext inputs at the same time, they will be In1 = `L0R0` and In2 = `L1R1`. We will choose `L0` and `L1` such that 
 
 `L0 = L1`
 
@@ -85,7 +85,7 @@ Then we will choose R0 and R1
 
 `R0 = R1` so that `ΔR = R0 ⊕ R1 = 0x00000000`
 
-Well why do we want R0 and R1 to be the same? Because, in the first round of encryption, the right 8 bytes get XORed with K1:
+Well why do we want `R0` and `R1` to be the same? Because, in the first round of encryption, the right 8 bytes get XORed with K1:
 
 
 `R0` becomes `R0 ⊕ K1`
@@ -146,14 +146,14 @@ There is one other thing that is going to aid us in cracking `K3`. That is the f
 
 I won't bother repeating all the logic again for the beginning as it is largely the same as for K4. However, there is a slight difference in the strategy for cracking K3. We need to use our K4 candidate keys to partially decrypt the ciphertext. In other words, we have to undo the last round of encryption so we can get the `CL` and `CR` just after the third round of encryption.
 
-Left side output of round 3:
-- `CL-K3 = CR` where CR is the right side output of the whole cipher
+Left side output of round 3 (`CL`<sub>`K3`</sub>):
+- `CL`<sub>`K3`</sub>` = CR` where `CR` is the right side output of the whole cipher.
 
-Right side output of round 3:
-- `CR-K3 = CL ⊕ (f(CR) ⊕ K4)` - undo the fourth round of encryption using the K4 candidate, where CR is the right side output of the whole cipher and CL is the output left side output of the whole cipher
+Right side output of round 3 (`CR`<sub>`K3`</sub>):
+- `CR`<sub>`K3`</sub>` = CL ⊕ (f(CR) ⊕ K4)` - undo the fourth round of encryption using the K4 candidate, where CR is the right side output of the whole cipher and CL is the output left side output of the whole cipher
 
 Finally, the formula for cracking K3 is the same as for cracking K4:
-- `CL-K3 = ΔZ ⊕ f(CR-K3 ⊕ K3)` - where the last half of `K3` is all the even bits from a `K4` candidate.
+- `CL`<sub>`K3`</sub>` = ΔZ ⊕ f(CR`<sub>`K3`</sub>` ⊕ K3)` - where the last half of `K3` is all the even bits from a `K4` candidate.
 
 <img src="images/k3_cracking.png" alt="Cypher structure" height="500">
 
@@ -162,3 +162,66 @@ After brute forcing, we end up with 16 candidate keys for K3 and have narrowed K
 
 ## Breaking K2
 
+As with the other keys, the overall tactic for cracking is the same. Since there is only one round of encryption that happens before reaching `K2`, the propagation isn't as hard to follow this time around. 
+
+Similar to how we used some bits of `K4` to reduce the number of `K3`s we have to test, we are going to use some bits of `K3` to reduce the number of `K2`s we have to test. Here is the strategy: 
+
+1. We intialize `K2` to be `0x00000000`
+2. We replace the even bits of `K2` with the first 16 bits of `K3`
+3. Loop from `0x0000` to `0xFFFF`
+  - For each number in the loop replace the odd bits of `K2` with the 16 bits from the number.
+
+This way we are only changing the bits that we didn't get from K3. This way we only have to test 2^16 possible `K2`s.
+
+You may be asking why we can't use the bits from `K4` to reduce the number of `K2`s we have to test even further... remember that `K4` is the right half of the master key. Since `K2` is the left half of the master key, there are no bits shared between `K2` and `K4`. However `K4` will still be used in the cracking of `K2` since we need it in order to partially decrypt our cyphertext.
+
+
+The strategy this time is going to be to choose `L0` and `L1` such that:
+
+- `L0 = L1` and `L0 ⊕ L1 = 0x00000000`
+
+and to choose `R0` and `R1` such that:
+
+- `R0 = R1` and `R0 ⊕ (R1 ⊕ f(ΔX)) = 0x8080d052 =  f(ΔX)`
+
+where `f` is the round function. 
+
+This time around we have to undo two rounds of encryption, let's recall the formulas we used to break round 3:
+
+- `CL`<sub>`K3`</sub>` = CR` where `CR` is the right side output of the whole cipher.
+- `CR`<sub>`K3`</sub>` = CL ⊕ (f(CR) ⊕ K4)` - undo the fourth round of encryption using the K4 candidate, where CR is the right side output of the whole cipher and CL is the output left side output of the whole cipher
+
+Now we have
+
+- `CL`<sub>`K2`</sub>` = CR`<sub>`K3`</sub>
+- `CL`<sub>`K2`</sub>` = CL ⊕ (f(CR) ⊕ K4)` (substitution)
+
+and 
+
+- `CR`<sub>`K2`</sub>` = CL`<sub>`K3`</sub>` ⊕ (f(CR`<sub>`K3`</sub>` ⊕ K3))`
+- `CR`<sub>`K2`</sub>` = CR ⊕ (f(CL ⊕ (f(CR) ⊕ K4)) ⊕ K3)` (substitution)
+
+finally
+
+- `CL`<sub>`K2`</sub>` = ΔZ ⊕ f(f(ΔX) ⊕ K2)`
+
+Here is how propagation is going to look: 
+
+<img src="images/k2_cracking.png" alt="Cypher structure" height="500">
+
+
+It may seem weird to choose `f(ΔX)` as our `ΔR` but there is a reason for it. The reason is, we need the the output of the second round function to be sufficiently random. This is mainly to reduce the number of false positive i.e. candidate keys for K2.
+
+After our brute forcing we get 8 candidate keys for `K2`.
+
+## Breaking the Master Key
+
+Finally we can start breaking the master key. Believe it or not, this is the easiest part. We know that `K4` is the right 8 bytes of the master key. We also know that `K2` is the left 8 bytes of the master key. We have 8 `K2` candidates, and after narrowing down the `K4` candidates during the breaking of round 3, we only have 1 `K4` candidate. That means we only have 8 potential master keys! All we have to do is encrypt a plaintext using a master key candidate, and then check if it matches the cyphertext generated by the executable we were given. If it does, we have a match!
+
+The master key we find is 
+
+🥁🥁🥁🥁🥁🥁🥁🥁🥁🥁🥁🥁🥁 
+
+`43cabfda6711ee7e`
+
+## THE END
